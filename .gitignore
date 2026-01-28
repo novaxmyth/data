@@ -1,0 +1,8 @@
+config.env
+*.pyc
+data*
+.vscode
+.idea
+log.txt
+mediainfo/*
+downloads
