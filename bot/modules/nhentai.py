@@ -102,7 +102,10 @@ async def _upload_to_telegraph(session: ClientSession, image_url: str) -> str | 
         return None
 
     fallback_type, extension = _guess_content_type(image_url)
-    upload_type = (content_type or fallback_type).split(";", 1)[0].strip() or fallback_type
+    normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_type not in {"image/jpeg", "image/png", "image/gif"}:
+        normalized_type = fallback_type
+    upload_type = normalized_type
 
     form = FormData()
     form.add_field("file", data, filename=f"image.{extension}", content_type=upload_type)
