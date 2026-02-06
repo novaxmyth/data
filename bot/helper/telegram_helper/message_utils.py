@@ -55,6 +55,24 @@ async def send_file(message, file, caption=""):
         return str(e)
 
 
+async def send_photo(message, photo, caption="", buttons=None):
+    try:
+        return await message.reply_photo(
+            photo=photo,
+            quote=True,
+            caption=caption,
+            disable_notification=True,
+            reply_markup=buttons,
+        )
+    except FloodWait as f:
+        LOGGER.warning(str(f))
+        await sleep(f.value * 1.2)
+        return await send_photo(message, photo, caption, buttons)
+    except Exception as e:
+        LOGGER.error(str(e))
+        return str(e)
+
+
 async def delete_message(message):
     try:
         await message.delete()
