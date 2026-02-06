@@ -1,23 +1,22 @@
 import asyncio
+from collections import OrderedDict
+from configparser import ConfigParser
+from contextlib import asynccontextmanager
 from json import loads
 from math import floor
-from time import time
 from os.path import splitext
-from configparser import ConfigParser
+from time import time
+
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath, remove
 from asyncio.subprocess import PIPE, create_subprocess_exec as exec
-from asyncio import sleep, TimeoutError
-from functools import lru_cache
-from contextlib import asynccontextmanager
-from collections import OrderedDict
 
 from pyrogram import filters
 from pyrogram.filters import command, regex
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 
 from bot import LOGGER, bot
-from bot.helper.ext_utils.bot_utils import sync_to_async, cmd_exec
+from bot.helper.ext_utils.bot_utils import sync_to_async
 from bot.helper.telegram_helper.filters import CustomFilters
 from bot.helper.telegram_helper.button_build import ButtonMaker
 from bot.helper.telegram_helper.message_utils import send_message, edit_message, delete_message, send_file
@@ -111,7 +110,7 @@ def get_readable_file_size(size_in_bytes: int):
     )
 
 
-def rcloneListNextPage(info, offset=0, max_results=ITEMS_PER_PAGE):
+def rclone_list_next_page(info, offset=0, max_results=ITEMS_PER_PAGE):
     """Paginate rclone list results"""
     start = offset
     end = max_results + start
@@ -128,18 +127,25 @@ def rcloneListNextPage(info, offset=0, max_results=ITEMS_PER_PAGE):
     return next_page, next_offset
 
 
-def rcloneListButtonMaker(info, button, menu_type, dir_callback, file_callback, user_id):
+def rclone_list_button_maker(
+    info,
+    button,
+    menu_type,
+    dir_callback,
+    file_callback,
+    user_id,
+):
     """Create buttons for rclone list items"""
-    for index, dir in enumerate(info):
-        path = dir["Path"]
+    for index, entry in enumerate(info):
+        path = entry["Path"]
         update_rclone_data(str(index), path, user_id)
 
-        if dir["MimeType"] == "inode/directory":
+        if entry["MimeType"] == "inode/directory":
             button.data_button(
                 f"📁 {path}", data=f"{menu_type}^{dir_callback}^{index}^{user_id}"
             )
         else:
-            size = get_readable_file_size(dir["Size"])
+            size = get_readable_file_size(entry["Size"])
             button.data_button(
                 f"[{size}] {path}",
                 data=f"{menu_type}^{file_callback}^{index}^True^{user_id}",
@@ -322,10 +328,7 @@ async def list_remotes(
 ):
     """List available rclone remotes"""
     try:
-        if message.reply_to_message:
-            user_id = get_message_owner_id(message)
-        else:
-            user_id = message.from_user.id
+        user_id = get_message_owner_id(message, fallback_user_id=message.from_user.id)
 
         conf = ConfigParser()
         conf.read(rclone_config)
@@ -429,10 +432,10 @@ async def list_folder(
         if total == 0:
             buttons.data_button("⌀ Nothing to show ⌀", f"{menu_type}^pages^{user_id}")
         else:
-            page, next_offset = await sync_to_async(rcloneListNextPage, sinfo)
+            page, next_offset = await sync_to_async(rclone_list_next_page, sinfo)
 
             await sync_to_async(
-                rcloneListButtonMaker,
+                rclone_list_button_maker,
                 info=page,
                 button=buttons,
                 menu_type=menu_type,
@@ -490,9 +493,10 @@ async def storage_menu_cb(client, callback_query):
         data = query.data
         cmd = data.split("^")
         message = query.message
+        owner_id = get_message_owner_id(message, fallback_user_id=query.from_user.id)
         user_id = query.from_user.id
 
-        if int(cmd[-1]) != user_id:
+        if int(cmd[-1]) != owner_id:
             await query.answer("Not yours!", show_alert=True)
             return
 
@@ -577,10 +581,7 @@ def get_used_bar(percentage):
 async def myfiles_settings(message, remote, remote_path, edit=False, is_folder=False):
     """Display file/folder settings menu"""
     try:
-        if message.reply_to_message:
-            user_id = get_message_owner_id(message)
-        else:
-            user_id = message.from_user.id
+        user_id = get_message_owner_id(message, fallback_user_id=message.from_user.id)
 
         buttons = ButtonMaker()
 
@@ -1377,11 +1378,11 @@ async def next_page_myfiles(client, callback_query):
         buttons.data_button("🔍 Search", f"myfilesmenu^search^{user_id}")
 
         next_info, _next_offset = await sync_to_async(
-            rcloneListNextPage, info, next_offset
+            rclone_list_next_page, info, next_offset
         )
 
         await sync_to_async(
-            rcloneListButtonMaker,
+            rclone_list_button_maker,
             info=next_info,
             button=buttons,
             menu_type=Menus.MYFILES,
