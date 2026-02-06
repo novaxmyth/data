@@ -73,6 +73,9 @@ async def restart(_, message):
 async def confirm_restart(_, query):
     await query.answer()
     data = query.data.split()
+    if len(data) < 3:
+        await query.answer("Invalid restart action!", show_alert=True)
+        return
     message = query.message
     user_id = int(data[1])
     action = data[2]
@@ -82,15 +85,31 @@ async def confirm_restart(_, query):
         return
       
     if action == "confirm":
-        reply_to = message.reply_to_message
+        reply_to = message.reply_to_message or message
         restart_message = await send_message(reply_to, "Restarting...")
+        if isinstance(restart_message, str):
+            LOGGER.error(f"Failed to send restart message: {restart_message}")
+            restart_message = await message.reply("Restarting...")
         await delete_message(message)
         await clean_all()
-        proc1 = await create_subprocess_exec("pkill", "-9", "-f", "gunicorn|ffmpeg|rclone")
-        proc2 = await create_subprocess_exec("python3", "update.py")
-        await gather(proc1.wait(), proc2.wait())
-        async with aiopen(".restartmsg", "w") as f:
-            await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
+        try:
+            proc1 = await create_subprocess_exec("pkill", "-9", "-f", "gunicorn|ffmpeg|rclone")
+            await proc1.wait()
+        except Exception as e:
+            LOGGER.warning(f"Failed to kill processes: {e}")
+
+        try:
+            if await aiopath.exists("update.py"):
+                proc2 = await create_subprocess_exec("python3", "update.py")
+                await proc2.wait()
+        except Exception as e:
+            LOGGER.warning(f"Failed to run update.py: {e}")
+
+        if hasattr(restart_message, "chat") and hasattr(restart_message, "id"):
+            async with aiopen(".restartmsg", "w") as f:
+                await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
+        else:
+            LOGGER.error("Restart message metadata could not be persisted")
         osexecl(executable, executable, "-m", "bot")
     else:
         await delete_message(message.reply_to_message)
@@ -130,36 +149,29 @@ async def bot_help(_, message):
 
 
 async def restart_notification():
+    chat_id, msg_id = 0, 0
     if await aiopath.isfile(".restartmsg"):
-        with open(".restartmsg") as f:
-            chat_id, msg_id = map(int, f)
-    else:
-        chat_id, msg_id = 0, 0
-
-    async def send_incompelete_task_message(cid, msg):
         try:
-            if msg.startswith("Restarted Successfully!"):
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id, text=msg
-                )
-                await remove(".restartmsg")
+            async with aiopen(".restartmsg", "r") as f:
+                content = await f.read()
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            if len(lines) >= 2:
+                chat_id, msg_id = int(lines[0]), int(lines[1])
             else:
-                await bot.send_message(
-                    chat_id=cid,
-                    text=msg,
-                    disable_web_page_preview=True,
-                    disable_notification=True,
-                )
+                LOGGER.error("Invalid .restartmsg format: expected chat_id and msg_id")
+                await remove(".restartmsg")
         except Exception as e:
-            LOGGER.error(e)
+            LOGGER.error(f"Failed to read .restartmsg: {e}")
+            await remove(".restartmsg")
 
-    if await aiopath.isfile(".restartmsg"):
+    if chat_id and msg_id and await aiopath.isfile(".restartmsg"):
         try:
             await bot.edit_message_text(
                 chat_id=chat_id, message_id=msg_id, text="Restarted Successfully!"
             )
-        except:
-            pass
+        except Exception as e:
+            LOGGER.error(f"Failed to edit restart message: {e}")
+    if await aiopath.isfile(".restartmsg"):
         await remove(".restartmsg")
 
 
