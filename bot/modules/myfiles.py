@@ -38,6 +38,29 @@ rclone_dict = {}
 active_tasks = {}  # Track background tasks
 
 
+def get_message_owner_id(message, fallback_user_id=None):
+    """Get owner user id from callback/menu message with fallback."""
+    if getattr(message, "reply_to_message", None) and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user.id
+    if getattr(message, "from_user", None):
+        return message.from_user.id
+    return fallback_user_id
+
+
+def get_user_tag(message):
+    """Build a safe user tag for status messages."""
+    if getattr(message, "reply_to_message", None) and message.reply_to_message.from_user:
+        source_user = message.reply_to_message.from_user
+    else:
+        source_user = getattr(message, "from_user", None)
+
+    if not source_user:
+        return "user"
+    if source_user.username:
+        return f"@{source_user.username}"
+    return source_user.mention
+
+
 class LRUCache:
     """Simple LRU cache with size limit"""
     def __init__(self, max_size=CACHE_MAX_SIZE):
@@ -300,7 +323,7 @@ async def list_remotes(
     """List available rclone remotes"""
     try:
         if message.reply_to_message:
-            user_id = message.reply_to_message.from_user.id
+            user_id = get_message_owner_id(message)
         else:
             user_id = message.from_user.id
 
@@ -353,7 +376,7 @@ async def list_folder(
 ):
     """List folder contents from rclone remote"""
     try:
-        user_id = message.reply_to_message.from_user.id
+        user_id = get_message_owner_id(message)
         buttons = ButtonMaker()
         msg = ""
         next_type = ""
@@ -555,7 +578,7 @@ async def myfiles_settings(message, remote, remote_path, edit=False, is_folder=F
     """Display file/folder settings menu"""
     try:
         if message.reply_to_message:
-            user_id = message.reply_to_message.from_user.id
+            user_id = get_message_owner_id(message)
         else:
             user_id = message.from_user.id
 
@@ -886,7 +909,7 @@ async def rclone_rmdirs(message, remote, remote_path, rclone_config):
 async def rclone_mkdir(client, message, remote, remote_path, tag):
     """Create a new directory"""
     try:
-        user_id = message.reply_to_message.from_user.id
+        user_id = get_message_owner_id(message)
         question = await send_message(message, "Send name for directory, /ignore to cancel")
 
         async def handle_response(client, response_message):
@@ -983,7 +1006,7 @@ async def rclone_dedupe(message, remote, remote_path, user_id, tag):
 async def rclone_rename(client, message, remote, remote_path, tag):
     """Rename a file"""
     try:
-        user_id = message.reply_to_message.from_user.id
+        user_id = get_message_owner_id(message)
         question = await send_message(message, "Send new name for file, /ignore to cancel")
 
         async def handle_response(client, response_message):
@@ -1203,7 +1226,7 @@ async def myfiles_callback(client, callback_query):
         data = query.data
         cmd = data.split("^")
         message = query.message
-        tag = f"@{message.reply_to_message.from_user.username}"
+        tag = get_user_tag(message)
         user_id = query.from_user.id
         base_dir = get_rclone_data("MYFILES_BASE_DIR", user_id)
         rclone_remote = get_rclone_data("MYFILES_REMOTE", user_id)
@@ -1341,7 +1364,7 @@ async def next_page_myfiles(client, callback_query):
         data = query.data
         message = query.message
         await query.answer()
-        user_id = message.reply_to_message.from_user.id
+        user_id = get_message_owner_id(message, fallback_user_id=query.from_user.id)
         _, next_offset, _, data_back_cb = data.split()
 
         info = get_rclone_data("info", user_id)
