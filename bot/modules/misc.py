@@ -45,7 +45,8 @@ def _sanitize_repo_name(url: str) -> str:
 
 def _is_valid_github_url(url: str) -> bool:
     parsed = urlparse(url)
-    return parsed.netloc.lower() in {"github.com", "www.github.com"}
+    hostname = parsed.hostname or ""
+    return hostname.lower() in {"github.com", "www.github.com"}
 
 
 def _build_request_paths(user_id: int, repo_name: str) -> GitHubRequestPaths:
