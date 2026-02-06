@@ -80,21 +80,41 @@ async def _search_gallery(session: ClientSession, query: str) -> NhentaiGallery 
     )
 
 
+def _guess_content_type(image_url: str) -> tuple[str, str]:
+    ext = image_url.rsplit(".", 1)[-1].lower()
+    if ext in {"jpg", "jpeg"}:
+        return "image/jpeg", "jpg"
+    if ext == "png":
+        return "image/png", "png"
+    if ext == "gif":
+        return "image/gif", "gif"
+    return "application/octet-stream", "bin"
+
+
 async def _upload_to_telegraph(session: ClientSession, image_url: str) -> str | None:
     try:
         async with session.get(image_url, timeout=REQUEST_TIMEOUT) as response:
             response.raise_for_status()
             data = await response.read()
+            content_type = response.headers.get("Content-Type")
     except Exception as err:
         LOGGER.error(f"NHentai image download failed: {err}")
         return None
 
+    fallback_type, extension = _guess_content_type(image_url)
+    upload_type = (content_type or fallback_type).split(";", 1)[0].strip() or fallback_type
+
     form = FormData()
-    form.add_field("file", data, filename="image.jpg", content_type="image/jpeg")
+    form.add_field("file", data, filename=f"image.{extension}", content_type=upload_type)
 
     try:
         async with session.post(TELEGRAPH_UPLOAD_URL, data=form, timeout=REQUEST_TIMEOUT) as response:
-            response.raise_for_status()
+            if response.status >= 400:
+                error_body = await response.text()
+                LOGGER.error(
+                    f"Telegraph upload failed: status={response.status} body={error_body}"
+                )
+                return None
             payload = await response.json(content_type=None)
     except Exception as err:
         LOGGER.error(f"Telegraph upload failed: {err}")
