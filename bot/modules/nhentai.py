@@ -1,4 +1,7 @@
 import asyncio
+import json
+import os
+import tempfile
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -14,10 +17,19 @@ from bot.helper.telegram_helper.message_utils import send_message, edit_message
 NHENTAI_API_BASE = "https://nhentai.net/api"
 NHENTAI_GALLERY_URL = f"{NHENTAI_API_BASE}/gallery/{{code}}"
 NHENTAI_SEARCH_URL = f"{NHENTAI_API_BASE}/galleries/search"
-TELEGRAPH_CREATE_URL = "https://api.telegra.ph/createPage"
+TELEGRAPH_API_BASE = "https://api.telegra.ph"
 TELEGRAPH_UPLOAD_URL = "https://telegra.ph/upload"
 MAX_IMAGES_PER_PAGE = 50
 REQUEST_TIMEOUT = 30
+NHENTAI_IMAGE_HEADERS = {
+    "Referer": "https://nhentai.net/",
+    "User-Agent": "Mozilla/5.0 (compatible; NHentaiTelegraphBot/1.0)",
+}
+TELEGRAPH_SHORT_NAME = "NHentai"
+TELEGRAPH_AUTHOR_NAME = "NHentai"
+
+_telegraph_token: str | None = None
+_telegraph_lock = asyncio.Lock()
 
 
 @dataclass(slots=True)
@@ -91,9 +103,52 @@ def _guess_content_type(image_url: str) -> tuple[str, str]:
     return "application/octet-stream", "bin"
 
 
+async def _telegraph_request(
+    session: ClientSession,
+    endpoint: str,
+    *,
+    data: dict | None = None,
+) -> dict:
+    url = f"{TELEGRAPH_API_BASE}/{endpoint}"
+    async with session.post(url, data=data, timeout=REQUEST_TIMEOUT) as response:
+        response.raise_for_status()
+        payload = await response.json(content_type=None)
+    if not payload.get("ok"):
+        LOGGER.error("Telegraph API error on %s: %s", endpoint, payload)
+        raise RuntimeError(f"Telegraph API error: {payload}")
+    return payload.get("result") or {}
+
+
+async def _ensure_telegraph_token(session: ClientSession) -> str:
+    global _telegraph_token
+    if _telegraph_token:
+        return _telegraph_token
+    async with _telegraph_lock:
+        if _telegraph_token:
+            return _telegraph_token
+        result = await _telegraph_request(
+            session,
+            "createAccount",
+            data={
+                "short_name": TELEGRAPH_SHORT_NAME,
+                "author_name": TELEGRAPH_AUTHOR_NAME,
+            },
+        )
+        token = result.get("access_token")
+        if not token:
+            raise RuntimeError("Telegraph did not return an access token.")
+        _telegraph_token = token
+        return token
+
+
 async def _upload_to_telegraph(session: ClientSession, image_url: str) -> str | None:
+    tmp_path = None
     try:
-        async with session.get(image_url, timeout=REQUEST_TIMEOUT) as response:
+        async with session.get(
+            image_url,
+            timeout=REQUEST_TIMEOUT,
+            headers=NHENTAI_IMAGE_HEADERS,
+        ) as response:
             response.raise_for_status()
             data = await response.read()
             content_type = response.headers.get("Content-Type")
@@ -107,45 +162,67 @@ async def _upload_to_telegraph(session: ClientSession, image_url: str) -> str | 
         normalized_type = fallback_type
     upload_type = normalized_type
 
-    form = FormData()
-    form.add_field("file", data, filename=f"image.{extension}", content_type=upload_type)
-
     try:
-        async with session.post(TELEGRAPH_UPLOAD_URL, data=form, timeout=REQUEST_TIMEOUT) as response:
-            if response.status >= 400:
-                error_body = await response.text()
-                LOGGER.error(
-                    f"Telegraph upload failed: status={response.status} body={error_body}"
-                )
-                return None
-            payload = await response.json(content_type=None)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as temp_file:
+            temp_file.write(data)
+            tmp_path = temp_file.name
+
+        form = FormData()
+        with open(tmp_path, "rb") as temp_file:
+            form.add_field(
+                "file",
+                temp_file,
+                filename=f"image.{extension}",
+                content_type=upload_type,
+            )
+            async with session.post(
+                TELEGRAPH_UPLOAD_URL, data=form, timeout=REQUEST_TIMEOUT
+            ) as response:
+                if response.status >= 400:
+                    error_body = await response.text()
+                    LOGGER.error(
+                        f"Telegraph upload failed: status={response.status} body={error_body}"
+                    )
+                    return None
+                payload = await response.json(content_type=None)
+
+        if not payload or not isinstance(payload, list):
+            LOGGER.error("Telegraph upload returned unexpected payload: %s", payload)
+            return None
+        src = payload[0].get("src")
+        if not src:
+            LOGGER.error("Telegraph upload missing src in payload: %s", payload)
+            return None
+        return f"https://telegra.ph{src}"
     except Exception as err:
         LOGGER.error(f"Telegraph upload failed: {err}")
         return None
-
-    if not payload or not isinstance(payload, list):
-        return None
-    src = payload[0].get("src")
-    if not src:
-        return None
-    return f"https://telegra.ph{src}"
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                LOGGER.warning("Failed to remove temp file: %s", tmp_path)
 
 
 async def _create_telegraph_page(session: ClientSession, title: str, image_urls: list[str]) -> str | None:
     content = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
-    payload = {
-        "title": title,
-        "author_name": "NHentai",
-        "content": content,
-    }
     try:
-        async with session.post(TELEGRAPH_CREATE_URL, json=payload, timeout=REQUEST_TIMEOUT) as response:
-            response.raise_for_status()
-            data = await response.json(content_type=None)
+        token = await _ensure_telegraph_token(session)
+        result = await _telegraph_request(
+            session,
+            "createPage",
+            data={
+                "access_token": token,
+                "title": title,
+                "author_name": TELEGRAPH_AUTHOR_NAME,
+                "content": json.dumps(content, separators=(",", ":")),
+            },
+        )
+        return result.get("url")
     except Exception as err:
         LOGGER.error(f"Telegraph createPage failed: {err}")
         return None
-    return (data.get("result") or {}).get("url")
 
 
 async def _chunked(iterable: list[str], size: int) -> list[list[str]]:
